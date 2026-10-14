@@ -1,5 +1,5 @@
 import { avgRankSignificance, BETTER_DIRECTION, formatProbability, rateSignificance } from "../lib/compare";
-import { FIELD_META, RANK_LABELS, type NumericKey, type PeriodStats } from "../lib/types";
+import { FIELD_META, RANK_LABELS, type PeriodStats } from "../lib/types";
 import {
   arrow,
   circle,
@@ -16,6 +16,18 @@ import {
   text,
   type Ctx,
 } from "./draw";
+import {
+  avgRankHeadline,
+  changes,
+  contrastHeadline,
+  per100,
+  per100Headline,
+  rankHeadline,
+  SMALL_CHANGE,
+  splitChanges,
+  type Change,
+  type MetricKey,
+} from "./insights";
 import type { Theme } from "./theme";
 
 export interface Texts {
@@ -58,23 +70,46 @@ const M = 110; // 動画用の余白
 /** 図の下地の色（白抜きの点を塗るのに使う） */
 const surface = (theme: Theme) => theme.panel ?? theme.background;
 
-const diff = (a: number | null, b: number | null) => (a === null || b === null ? null : b - a);
+/** 良くなったら緑、悪くなったら赤、どちらでもなければ灰 */
+const verdictColor = (theme: Theme, c: Change) => (c.verdict === 1 ? theme.good : c.verdict === -1 ? theme.bad : theme.subText);
 
 function sub(p: PeriodStats): string {
   const parts = [p.room && `${p.room}の間`, p.games !== null && `${p.games.toLocaleString()}戦`].filter(Boolean);
   return parts.join(" ・ ");
 }
 
-function header(ctx: Ctx, input: RenderInput, title: string) {
-  const { theme, before, after, texts } = input;
-  text(ctx, title, M, 150, { size: 64, weight: 900, color: theme.text, maxWidth: VIDEO_W - M * 2 - 520 });
-  const line2 = `${texts.beforeLabel}（${sub(before) || "—"}）  →  ${texts.afterLabel}（${sub(after) || "—"}）`;
-  text(ctx, line2, M, 210, { size: 30, color: theme.subText, maxWidth: VIDEO_W - M * 2 });
+/**
+ * スライドの上部。小さな見出し（何の図か）と、大きな見出し（この図の結論）を出す。
+ * 結論を先に見せると、動画で一瞬映っただけでも伝わる
+ */
+function header(ctx: Ctx, input: RenderInput, kicker: string, headline: string, reserveRight = 0) {
+  const { theme } = input;
+  text(ctx, kicker, M, 128, { size: 32, weight: 700, color: theme.accent, maxWidth: VIDEO_W - M * 2 - reserveRight });
+  text(ctx, headline, M, 206, { size: 62, weight: 900, color: theme.text, maxWidth: VIDEO_W - M * 2 - reserveRight });
 }
 
-function footer(ctx: Ctx, input: RenderInput, note: string) {
-  if (!note) return;
-  text(ctx, note, VIDEO_W - M, VIDEO_H - 92, { size: 26, color: input.theme.mutedText, align: "right" });
+/** スライドの下部。左に比べている期間、右に補足 */
+function footer(ctx: Ctx, input: RenderInput, note = "") {
+  const { theme, before, after, texts } = input;
+  const left = `${texts.beforeLabel}: ${sub(before) || "—"}　→　${texts.afterLabel}: ${sub(after) || "—"}`;
+  text(ctx, left, M, VIDEO_H - 92, { size: 24, color: theme.mutedText, maxWidth: note ? 900 : VIDEO_W - M * 2 });
+  if (note) text(ctx, note, VIDEO_W - M, VIDEO_H - 92, { size: 24, color: theme.mutedText, align: "right", maxWidth: VIDEO_W - M * 2 - 940 });
+}
+
+/** 「改善」「悪化」「変化小」の札。色だけに頼らず文字でも示す */
+function verdictBadge(ctx: Ctx, theme: Theme, x: number, y: number, c: Pick<Change, "verdict" | "diff">, size = 26, align: "left" | "right" = "left") {
+  if (c.verdict === 0) return 0;
+  const label = c.verdict === 1 ? "改善" : "悪化";
+  const color = c.verdict === 1 ? theme.good : theme.bad;
+  font(ctx, size, 700);
+  const w = ctx.measureText(label).width + size;
+  const h = size * 1.5;
+  const bx = align === "right" ? x - w : x;
+  ctx.fillStyle = color;
+  roundRect(ctx, bx, y - h / 2, w, h, h / 2);
+  ctx.fill();
+  text(ctx, label, bx + w / 2, y + 1, { size, weight: 700, color: theme.id === "light" ? "#ffffff" : "#0b0f14", align: "center", baseline: "middle" });
+  return w;
 }
 
 function significanceNote(input: RenderInput): string {
@@ -120,55 +155,165 @@ const hero: Design = {
     const { theme, before, after } = input;
     fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
     panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
-    header(ctx, input, input.texts.title);
+    header(ctx, input, "結果まとめ", input.texts.title);
 
     // 主役: 平均順位
-    text(ctx, "平均順位", VIDEO_W / 2, 360, { size: 40, weight: 700, color: theme.subText, align: "center" });
-    beforeAfter(ctx, VIDEO_W / 2, 560, fmt(before.avgRank, 3), fmt(after.avgRank, 3), { size: 210, theme, align: "center" });
-    const d = diff(before.avgRank, after.avgRank);
-    text(ctx, `${fmtDiff(d, 3)}（${d !== null && d < 0 ? "改善" : d !== null && d > 0 ? "悪化" : "変化なし"}）`, VIDEO_W / 2, 650, {
-      size: 44,
-      weight: 700,
-      color: diffColor(theme, d, -1),
-      align: "center",
-    });
+    text(ctx, "平均順位", VIDEO_W / 2, 340, { size: 40, weight: 700, color: theme.subText, align: "center" });
+    beforeAfter(ctx, VIDEO_W / 2, 540, fmt(before.avgRank, 3), fmt(after.avgRank, 3), { size: 200, theme, align: "center" });
+    const [avg] = changes(before, after, ["avgRank"]);
+    if (avg) {
+      const label = `${fmtDiff(avg.diff, 3)}`;
+      font(ctx, 44, 700);
+      const lw = ctx.measureText(label).width;
+      font(ctx, 30, 700);
+      const bw = ctx.measureText("改善").width + 30;
+      const x = VIDEO_W / 2 - (lw + 20 + bw) / 2;
+      text(ctx, label, x, 640, { size: 44, weight: 700, color: diffColor(theme, avg.diff, -1), baseline: "middle" });
+      verdictBadge(ctx, theme, x + lw + 20, 638, avg, 30);
+    }
 
     // 下の3つのカード
-    const tiles: { label: string; a: string; b: string; d: string; color: string }[] = [
-      {
-        label: "1位率",
-        a: fmt(before.rankRates[0], 1, "%"),
-        b: fmt(after.rankRates[0], 1, "%"),
-        d: fmtDiff(diff(before.rankRates[0], after.rankRates[0]), 1, "pt"),
-        color: diffColor(theme, diff(before.rankRates[0], after.rankRates[0]), 1),
-      },
-      {
-        label: "4位率",
-        a: fmt(before.rankRates[3], 1, "%"),
-        b: fmt(after.rankRates[3], 1, "%"),
-        d: fmtDiff(diff(before.rankRates[3], after.rankRates[3]), 1, "pt"),
-        color: diffColor(theme, diff(before.rankRates[3], after.rankRates[3]), -1),
-      },
-      {
-        label: "安定段位",
-        a: before.stableRank || "—",
-        b: after.stableRank || "—",
-        d: "",
-        color: theme.subText,
-      },
+    const [top, last] = changes(before, after, ["rank1", "rank4"]);
+    const tiles: { label: string; a: string; b: string; change?: Change }[] = [
+      { label: "トップ率", a: fmt(before.rankRates[0], 1, "%"), b: fmt(after.rankRates[0], 1, "%"), change: top },
+      { label: "ラス率", a: fmt(before.rankRates[3], 1, "%"), b: fmt(after.rankRates[3], 1, "%"), change: last },
+      { label: "安定段位", a: before.stableRank || "—", b: after.stableRank || "—" },
     ];
     const tileW = (VIDEO_W - M * 2 - 60) / 3;
     tiles.forEach((t, i) => {
       const x = M + i * (tileW + 30);
-      const y = 730;
+      const y = 720;
       ctx.fillStyle = theme.grid;
-      roundRect(ctx, x, y, tileW, 230, 24);
+      roundRect(ctx, x, y, tileW, 220, 24);
       ctx.fill();
-      text(ctx, t.label, x + 40, y + 62, { size: 34, weight: 700, color: theme.subText });
-      if (t.d) text(ctx, t.d, x + tileW - 40, y + 62, { size: 34, weight: 700, color: t.color, align: "right" });
-      beforeAfter(ctx, x + tileW / 2, y + 170, t.a, t.b, { size: 76, theme, align: "center" });
+      text(ctx, t.label, x + 36, y + 58, { size: 34, weight: 700, color: theme.text });
+      if (t.change) {
+        const bw = verdictBadge(ctx, theme, x + tileW - 36, y + 46, t.change, 24, "right");
+        text(ctx, fmtDiff(t.change.diff, 1, "pt"), x + tileW - 48 - bw, y + 58, { size: 30, weight: 700, color: verdictColor(theme, t.change), align: "right" });
+      }
+      beforeAfter(ctx, x + tileW / 2, y + 168, t.a, t.b, { size: 72, theme, align: "center" });
     });
     footer(ctx, input, significanceNote(input));
+  },
+};
+
+/** 「変わったもの」と「ほとんど変わらなかったもの」を左右に並べる */
+const contrast: Design = {
+  id: "contrast",
+  name: "変わった・変わらなかった",
+  kind: "video",
+  width: VIDEO_W,
+  height: VIDEO_H,
+  draw(ctx, input) {
+    const { theme, before, after } = input;
+    fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
+    panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
+    header(ctx, input, "変わったもの・変わらなかったもの", contrastHeadline(before, after));
+    const { big, small } = splitChanges(before, after);
+    const colW = (VIDEO_W - M * 2 - 40) / 2;
+    const top = 280;
+    const h = VIDEO_H - top - 150;
+
+    const column = (x: number, title: string, note: string, items: Change[], emphasize: boolean) => {
+      ctx.fillStyle = theme.grid;
+      ctx.globalAlpha = emphasize ? 1 : 0.55;
+      roundRect(ctx, x, top, colW, h, 28);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      text(ctx, title, x + 44, top + 76, { size: 44, weight: 900, color: emphasize ? theme.accent : theme.subText });
+      text(ctx, note, x + colW - 44, top + 76, { size: 24, color: theme.mutedText, align: "right" });
+      if (!items.length) {
+        text(ctx, "該当なし", x + 44, top + 170, { size: 34, color: theme.mutedText });
+        return;
+      }
+      const rowH = Math.min(emphasize ? 150 : 120, (h - 130) / items.length);
+      items.forEach((c, i) => {
+        const y = top + 130 + i * rowH + rowH / 2;
+        text(ctx, c.label, x + 44, y - (emphasize ? 18 : 0), { size: emphasize ? 44 : 36, weight: 700, color: emphasize ? theme.text : theme.subText, baseline: "middle" });
+        if (emphasize) {
+          text(ctx, `${fmt(c.before, 1, "%")} → ${fmt(c.after, 1, "%")}`, x + 44, y + 34, { size: 30, color: theme.subText, baseline: "middle" });
+          const bw = verdictBadge(ctx, theme, x + colW - 44, y - 18, c, 26, "right");
+          text(ctx, fmtDiff(c.diff, 1, "pt"), x + colW - 44 - bw - (bw ? 16 : 0), y - 16, { size: 56, weight: 900, color: verdictColor(theme, c), align: "right", baseline: "middle" });
+        } else {
+          text(ctx, `${fmt(c.before, 1, "%")} → ${fmt(c.after, 1, "%")}`, x + colW * 0.42, y, { size: 32, color: theme.subText, baseline: "middle" });
+          text(ctx, fmtDiff(c.diff, 1, "pt"), x + colW - 44, y, { size: 32, weight: 700, color: theme.mutedText, align: "right", baseline: "middle" });
+        }
+      });
+    };
+    column(M, "ほとんど同じ", `差 ${SMALL_CHANGE}pt 未満`, small.slice(0, 5), false);
+    column(M + colW + 40, "大きく変わった", "差 3pt 以上", big.slice(0, 4), true);
+    footer(ctx, input);
+  },
+};
+
+/** 100戦を100マスで表し、順位ごとに色を塗る */
+function waffle(ctx: Ctx, theme: Theme, counts: number[], x: number, y: number, cell: number, gap: number) {
+  let n = 0;
+  counts.forEach((c, k) => {
+    for (let i = 0; i < c && n < 100; i++, n++) {
+      const cx = x + (n % 10) * (cell + gap);
+      const cy = y + Math.floor(n / 10) * (cell + gap);
+      ctx.fillStyle = theme.rank[k];
+      roundRect(ctx, cx, cy, cell, cell, 6);
+      ctx.fill();
+    }
+  });
+}
+
+const PLACE_NAMES = ["トップ", "2着", "3着", "ラス"];
+
+const waffleSlide: Design = {
+  id: "waffle",
+  name: "100戦あたり",
+  kind: "video",
+  width: VIDEO_W,
+  height: VIDEO_H,
+  draw(ctx, input) {
+    const { theme, before, after, texts } = input;
+    fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
+    panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
+    header(ctx, input, "100戦あたりの回数", per100Headline(before, after));
+    const a = per100(before.rankRates);
+    const b = per100(after.rankRates);
+    if (!a || !b) {
+      text(ctx, "順位の割合を入力すると表示できます", VIDEO_W / 2, VIDEO_H / 2, { size: 36, color: theme.subText, align: "center" });
+      return;
+    }
+    const cell = 40;
+    const gap = 6;
+    const size = cell * 10 + gap * 9;
+    const top = 300;
+    const xs = [M + 60, VIDEO_W - M - 60 - size];
+    [
+      { counts: a, label: texts.beforeLabel, x: xs[0] },
+      { counts: b, label: texts.afterLabel, x: xs[1] },
+    ].forEach((g) => {
+      text(ctx, g.label, g.x + size / 2, top - 24, { size: 40, weight: 900, color: theme.text, align: "center" });
+      waffle(ctx, theme, g.counts, g.x, top, cell, gap);
+      // マスの下に回数
+      const itemW = size / 4;
+      g.counts.forEach((c, k) => {
+        const ix = g.x + k * itemW + itemW / 2;
+        text(ctx, PLACE_NAMES[k], ix, top + size + 52, { size: 26, weight: 700, color: theme.subText, align: "center" });
+        text(ctx, `${c}回`, ix, top + size + 100, { size: 40, weight: 900, color: theme.text, align: "center" });
+        ctx.fillStyle = theme.rank[k];
+        roundRect(ctx, ix - 30, top + size + 116, 60, 8, 4);
+        ctx.fill();
+      });
+    });
+    // 真ん中に矢印と、トップ・ラスの増減
+    const midX = (xs[0] + size + xs[1]) / 2;
+    arrow(ctx, midX - 90, top + size / 2, 180, 22, theme.mutedText);
+    const [top1, last] = changes(before, after, ["rank1", "rank4"]);
+    [
+      { c: top1, name: "トップ", dy: -120, d: b[0] - a[0] },
+      { c: last, name: "ラス", dy: 120, d: b[3] - a[3] },
+    ].forEach(({ c, name, dy, d }) => {
+      if (!c) return;
+      const color = verdictColor(theme, c);
+      text(ctx, `${name} ${d > 0 ? "+" : d < 0 ? "−" : "±"}${Math.abs(d)}回`, midX, top + size / 2 + dy, { size: 48, weight: 900, color, align: "center", baseline: "middle" });
+    });
+    footer(ctx, input, "1マス＝1戦");
   },
 };
 
@@ -219,8 +364,8 @@ const ranks: Design = {
     const { theme, before, after, texts } = input;
     fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
     panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
-    header(ctx, input, "順位の割合");
-    rankLegend(ctx, theme, VIDEO_W - M, 140);
+    header(ctx, input, "順位の割合", rankHeadline(before, after), 560);
+    rankLegend(ctx, theme, VIDEO_W - M, 128);
 
     const x = M + 300;
     const w = VIDEO_W - x - M;
@@ -245,39 +390,29 @@ const ranks: Design = {
       rankBar(ctx, theme, r.p.rankRates, x, r.y, w, h, 40);
     }
 
-    // 1位と4位の増減
-    const d1 = diff(before.rankRates[0], after.rankRates[0]);
-    const d4 = diff(before.rankRates[3], after.rankRates[3]);
+    // トップとラスの増減
+    const [c1, c4] = changes(before, after, ["rank1", "rank4"]);
+    let cx = x;
+    for (const [name, c] of [["トップ", c1], ["ラス", c4]] as const) {
+      if (!c) continue;
+      const label = `${name} ${fmtDiff(c.diff, 1, "pt")}`;
+      text(ctx, label, cx, 870, { size: 48, weight: 900, color: verdictColor(theme, c), baseline: "middle" });
+      font(ctx, 48, 900);
+      cx += ctx.measureText(label).width + 20;
+      cx += verdictBadge(ctx, theme, cx, 868, c, 28) + 70;
+    }
     const s1 = rateSignificance(before.rankRates[0], before.games, after.rankRates[0], after.games);
     const s4 = rateSignificance(before.rankRates[3], before.games, after.rankRates[3], after.games);
-    text(ctx, `1位 ${fmtDiff(d1, 1, "pt")}`, x, 870, { size: 48, weight: 900, color: diffColor(theme, d1, 1) });
-    text(ctx, `4位 ${fmtDiff(d4, 1, "pt")}`, x + 420, 870, { size: 48, weight: 900, color: diffColor(theme, d4, -1) });
-    const notes = [s1 && `1位率の差が偶然で出る確率: ${formatProbability(s1.p)}`, s4 && `4位率: ${formatProbability(s4.p)}`].filter(Boolean);
+    const notes = [s1 && `偶然で出る確率 トップ: ${formatProbability(s1.p)}`, s4 && `ラス: ${formatProbability(s4.p)}`].filter(Boolean);
     footer(ctx, input, notes.join("　"));
   },
 };
 
-type DumbbellKey = NumericKey | "rank1" | "rank4";
-const DUMBBELL_ROWS: { key: DumbbellKey; label: string }[] = [
-  { key: "rank1", label: "1位率" },
-  { key: "rank4", label: "4位率" },
-  { key: "winRate", label: "和了率" },
-  { key: "dealInRate", label: "放銃率" },
-  { key: "callRate", label: "副露率" },
-  { key: "riichiRate", label: "立直率" },
-  { key: "damaRate", label: "ダマ率" },
-  { key: "bustRate", label: "飛び率" },
-];
-
-function pick(p: PeriodStats, key: DumbbellKey): number | null {
-  if (key === "rank1") return p.rankRates[0];
-  if (key === "rank4") return p.rankRates[3];
-  return p[key];
-}
+const DUMBBELL_ROWS: MetricKey[] = ["rank1", "rank4", "winRate", "dealInRate", "callRate", "riichiRate", "damaRate", "bustRate"];
 
 const dumbbell: Design = {
   id: "dumbbell",
-  name: "何が変わった？",
+  name: "項目ごとの変化",
   kind: "video",
   width: VIDEO_W,
   height: VIDEO_H,
@@ -285,10 +420,18 @@ const dumbbell: Design = {
     const { theme, before, after, texts } = input;
     fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
     panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
-    header(ctx, input, "何が変わった？");
+    const rows = changes(before, after, DUMBBELL_ROWS);
+    const biggest = [...rows].sort((p, q) => Math.abs(q.diff) - Math.abs(p.diff))[0];
+    header(
+      ctx,
+      input,
+      "項目ごとの変化",
+      biggest ? `いちばん変わったのは${biggest.label}（${fmtDiff(biggest.diff, 1, "pt")}）` : "項目ごとの変化",
+      460,
+    );
 
     // 凡例
-    const ly = 140;
+    const ly = 128;
     let lx = VIDEO_W - M;
     font(ctx, 28, 500);
     lx -= ctx.measureText(texts.afterLabel).width;
@@ -299,14 +442,13 @@ const dumbbell: Design = {
     text(ctx, texts.beforeLabel, lx, ly, { size: 28, weight: 500, color: theme.subText, baseline: "middle" });
     circle(ctx, lx - 24, ly, 11, surface(theme), theme.before, 4);
 
-    const rows = DUMBBELL_ROWS.filter((r) => pick(before, r.key) !== null && pick(after, r.key) !== null);
-    const max = Math.max(10, ...rows.flatMap((r) => [pick(before, r.key)!, pick(after, r.key)!]));
+    const max = Math.max(10, ...rows.flatMap((r) => [r.before, r.after]));
     const axisMax = Math.min(100, Math.ceil((max * 1.1) / 10) * 10);
     const tick = axisMax > 60 ? 20 : 10;
     const x0 = M + 230;
-    const x1 = VIDEO_W - M - 260;
+    const x1 = VIDEO_W - M - 330;
     const top = 290;
-    const rowH = Math.min(92, (VIDEO_H - top - 130) / Math.max(1, rows.length));
+    const rowH = Math.min(92, (VIDEO_H - top - 150) / Math.max(1, rows.length));
     const sx = (v: number) => x0 + (v / axisMax) * (x1 - x0);
 
     // 目盛り
@@ -314,27 +456,27 @@ const dumbbell: Design = {
       line(ctx, sx(v), top - 30, sx(v), top + rowH * rows.length - 20, theme.grid, 2);
       text(ctx, `${v}%`, sx(v), top + rowH * rows.length + 16, { size: 24, color: theme.mutedText, align: "center" });
     }
-    text(ctx, "差", VIDEO_W - M, top - 40, { size: 24, color: theme.mutedText, align: "right" });
 
     rows.forEach((r, i) => {
       const y = top + i * rowH + rowH / 2 - 20;
-      const a = pick(before, r.key)!;
-      const b = pick(after, r.key)!;
-      const d = b - a;
-      const color = diffColor(theme, d, BETTER_DIRECTION[r.key]);
+      // 差が小さい項目は薄くして、大きく変わった項目に目が行くようにする
+      ctx.globalAlpha = Math.abs(r.diff) < SMALL_CHANGE ? 0.4 : 1;
+      const color = verdictColor(theme, r);
       text(ctx, r.label, M, y, { size: 34, weight: 700, color: theme.text, baseline: "middle" });
-      line(ctx, sx(a), y, sx(b), y, color, 8);
-      circle(ctx, sx(a), y, 13, surface(theme), theme.before, 4);
-      circle(ctx, sx(b), y, 15, theme.accent);
+      line(ctx, sx(r.before), y, sx(r.after), y, color, 8);
+      circle(ctx, sx(r.before), y, 13, surface(theme), theme.before, 4);
+      circle(ctx, sx(r.after), y, 15, theme.accent);
       // 値は、点どうしが重ならない外側に置く
-      const left = Math.min(a, b);
-      const leftIsBefore = a <= b;
+      const leftIsBefore = r.before <= r.after;
+      const left = Math.min(r.before, r.after);
+      const right = Math.max(r.before, r.after);
       text(ctx, fmt(left, 1), sx(left) - 26, y, { size: 26, weight: leftIsBefore ? 500 : 700, color: leftIsBefore ? theme.before : theme.text, align: "right", baseline: "middle" });
-      const right = Math.max(a, b);
       text(ctx, fmt(right, 1), sx(right) + 26, y, { size: 26, weight: leftIsBefore ? 700 : 500, color: leftIsBefore ? theme.text : theme.before, baseline: "middle" });
-      text(ctx, fmtDiff(d, 2, "pt"), VIDEO_W - M, y, { size: 34, weight: 900, color, align: "right", baseline: "middle" });
+      const bw = verdictBadge(ctx, theme, VIDEO_W - M, y, r, 22, "right");
+      text(ctx, fmtDiff(r.diff, 1, "pt"), VIDEO_W - M - bw - (bw ? 14 : 0), y, { size: 32, weight: 900, color, align: "right", baseline: "middle" });
+      ctx.globalAlpha = 1;
     });
-    footer(ctx, input, "緑＝良くなった　赤＝悪くなった　灰＝良し悪しのない項目");
+    footer(ctx, input, `薄い項目は差が ${SMALL_CHANGE}pt 未満`);
   },
 };
 
@@ -348,8 +490,7 @@ const trend: Design = {
     const { theme, after, texts } = input;
     fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
     panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
-    text(ctx, "平均順位の推移", M, 150, { size: 64, weight: 900, color: theme.text });
-    text(ctx, "上に行くほど良い成績", M, 210, { size: 30, color: theme.subText });
+    header(ctx, input, "平均順位の推移（上に行くほど良い）", avgRankHeadline(input.before, after));
 
     const pts = input.periods.filter((p) => p.avgRank !== null);
     if (pts.length < 2) {
@@ -409,7 +550,7 @@ const trend: Design = {
 
 const TABLE_ROWS: { label: string; get: (p: PeriodStats) => number | string | null; digits: number; unit: string; better?: 1 | -1 | 0 }[] = [
   ...FIELD_META.map((f) => ({ label: f.label, get: (p: PeriodStats) => p[f.key], digits: f.digits, unit: f.unit, better: BETTER_DIRECTION[f.key] })),
-  ...RANK_LABELS.map((l, k) => ({ label: `${l}率`, get: (p: PeriodStats) => p.rankRates[k], digits: 2, unit: "%", better: k === 0 ? 1 : k === 3 ? -1 : 0 }) as const),
+  ...RANK_LABELS.map((_, k) => ({ label: ["トップ率", "2着率", "3着率", "ラス率"][k], get: (p: PeriodStats) => p.rankRates[k], digits: 2, unit: "%", better: k === 0 ? 1 : k === 3 ? -1 : 0 }) as const),
   { label: "記録段位", get: (p) => p.recordRank || null, digits: 0, unit: "" },
   { label: "安定段位", get: (p) => p.stableRank || null, digits: 0, unit: "" },
 ];
@@ -424,7 +565,7 @@ const table: Design = {
     const { theme, before, after, texts } = input;
     fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
     panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
-    header(ctx, input, "成績の比較");
+    header(ctx, input, "成績の比較", "全項目の比較");
     const perCol = Math.ceil(TABLE_ROWS.length / 2);
     const colW = (VIDEO_W - M * 2 - 80) / 2;
     const top = 290;
@@ -569,4 +710,4 @@ const thumbBars: Design = {
   },
 };
 
-export const DESIGNS: Design[] = [hero, ranks, dumbbell, trend, table, thumbNumbers, thumbRank, thumbBars];
+export const DESIGNS: Design[] = [hero, contrast, waffleSlide, ranks, dumbbell, trend, table, thumbNumbers, thumbRank, thumbBars];
