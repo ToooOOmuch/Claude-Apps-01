@@ -50,6 +50,12 @@ export interface RenderInput {
   periods: PeriodStats[];
   texts: Texts;
   theme: Theme;
+  /**
+   * アニメーション中の進み具合（0〜1）。録画のときだけ使う。
+   * 録画中の after は途中の値になるので、見出しには最終的な値（target）を使う
+   */
+  progress?: number;
+  target?: PeriodStats;
 }
 
 export interface Design {
@@ -69,6 +75,9 @@ const M = 110; // 動画用の余白
 
 /** 図の下地の色（白抜きの点を塗るのに使う） */
 const surface = (theme: Theme) => theme.panel ?? theme.background;
+
+/** 見出しに使う「後」の値（アニメーション中でも最終的な値） */
+const finalAfter = (input: RenderInput) => input.target ?? input.after;
 
 /** 良くなったら緑、悪くなったら赤、どちらでもなければ灰 */
 const verdictColor = (theme: Theme, c: Change) => (c.verdict === 1 ? theme.good : c.verdict === -1 ? theme.bad : theme.subText);
@@ -208,8 +217,11 @@ const contrast: Design = {
     const { theme, before, after } = input;
     fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
     panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
-    header(ctx, input, "変わったもの・変わらなかったもの", contrastHeadline(before, after));
-    const { big, small } = splitChanges(before, after);
+    header(ctx, input, "変わったもの・変わらなかったもの", contrastHeadline(before, finalAfter(input)));
+    // どの列に入れるかは最終的な値で決め、表示する値はアニメーション中の値にする
+    const { big, small } = splitChanges(before, finalAfter(input));
+    const now = new Map(changes(before, after).map((c) => [c.key, c]));
+    const current = (list: Change[]) => list.map((c) => now.get(c.key) ?? c);
     const colW = (VIDEO_W - M * 2 - 40) / 2;
     const top = 280;
     const h = VIDEO_H - top - 150;
@@ -240,8 +252,8 @@ const contrast: Design = {
         }
       });
     };
-    column(M, "ほとんど同じ", `差 ${SMALL_CHANGE}pt 未満`, small.slice(0, 5), false);
-    column(M + colW + 40, "大きく変わった", "差 3pt 以上", big.slice(0, 4), true);
+    column(M, "ほとんど同じ", `差 ${SMALL_CHANGE}pt 未満`, current(small.slice(0, 5)), false);
+    column(M + colW + 40, "大きく変わった", "差 3pt 以上", current(big.slice(0, 4)), true);
     footer(ctx, input);
   },
 };
@@ -272,7 +284,7 @@ const waffleSlide: Design = {
     const { theme, before, after, texts } = input;
     fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
     panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
-    header(ctx, input, "100戦あたりの回数", per100Headline(before, after));
+    header(ctx, input, "100戦あたりの回数", per100Headline(before, finalAfter(input)));
     const a = per100(before.rankRates);
     const b = per100(after.rankRates);
     if (!a || !b) {
@@ -364,7 +376,7 @@ const ranks: Design = {
     const { theme, before, after, texts } = input;
     fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
     panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
-    header(ctx, input, "順位の割合", rankHeadline(before, after), 560);
+    header(ctx, input, "順位の割合", rankHeadline(before, finalAfter(input)), 560);
     rankLegend(ctx, theme, VIDEO_W - M, 128);
 
     const x = M + 300;
@@ -421,7 +433,7 @@ const dumbbell: Design = {
     fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
     panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
     const rows = changes(before, after, DUMBBELL_ROWS);
-    const biggest = [...rows].sort((p, q) => Math.abs(q.diff) - Math.abs(p.diff))[0];
+    const biggest = changes(before, finalAfter(input), DUMBBELL_ROWS).sort((p, q) => Math.abs(q.diff) - Math.abs(p.diff))[0];
     header(
       ctx,
       input,
@@ -490,9 +502,12 @@ const trend: Design = {
     const { theme, after, texts } = input;
     fillBackground(ctx, theme, VIDEO_W, VIDEO_H);
     panel(ctx, theme, 60, 60, VIDEO_W - 120, VIDEO_H - 120);
-    header(ctx, input, "平均順位の推移（上に行くほど良い）", avgRankHeadline(input.before, after));
+    header(ctx, input, "平均順位の推移（上に行くほど良い）", avgRankHeadline(input.before, finalAfter(input)));
 
-    const pts = input.periods.filter((p) => p.avgRank !== null);
+    const all = input.periods.filter((p) => p.avgRank !== null);
+    // 録画中は、点を左から順に出していく
+    const shown = input.progress === undefined ? all.length : Math.max(1, Math.ceil(input.progress * all.length));
+    const pts = all;
     if (pts.length < 2) {
       text(ctx, "期間ごとのスクリーンショットを2枚以上読み込むと、推移を表示できます", VIDEO_W / 2, VIDEO_H / 2, {
         size: 36,
@@ -535,9 +550,9 @@ const trend: Design = {
     ctx.lineWidth = 4;
     ctx.lineJoin = "round";
     ctx.beginPath();
-    pts.forEach((p, i) => (i ? ctx.lineTo(sx(i), sy(p.avgRank!)) : ctx.moveTo(sx(i), sy(p.avgRank!))));
+    pts.slice(0, shown).forEach((p, i) => (i ? ctx.lineTo(sx(i), sy(p.avgRank!)) : ctx.moveTo(sx(i), sy(p.avgRank!))));
     ctx.stroke();
-    pts.forEach((p, i) => {
+    pts.slice(0, shown).forEach((p, i) => {
       const isAfter = idx >= 0 && i >= idx;
       circle(ctx, sx(i), sy(p.avgRank!), 14, isAfter ? theme.accent : theme.before, surface(theme), 4);
       text(ctx, p.avgRank!.toFixed(3), sx(i), sy(p.avgRank!) - 32, { size: 30, weight: 900, color: theme.text, align: "center" });

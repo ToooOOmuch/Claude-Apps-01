@@ -263,3 +263,50 @@ label {
   white-space: pre-wrap;
   font-size: 12px;
 }
+.actions {
+  display: flex;
+  gap: 8px;
+}
+.actions button.ghost {
+  margin-top: 0;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.row button.ghost {
+  margin-top: 0;
+}
+.ghost-button {
+  display: inline-block;
+  font-size: 16px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  cursor: pointer;
+}
+.script {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+.script textarea {
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.8;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+.script button {
+  justify-self: start;
+}

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { DesignPreview, downloadCanvas, fileName } from "./components/DesignPreview";
+import { DesignPreview, downloadBlob, downloadCanvas, fileName } from "./components/DesignPreview";
 import { PeriodEditor } from "./components/PeriodEditor";
 import { fileToImage, getOcr } from "./lib/browserOcr";
 import { avgRankSignificance, formatProbability, sortByStart } from "./lib/compare";
 import { extractFromScreenshot } from "./lib/extract";
-import { DEFAULT_TEXTS, load, save } from "./lib/storage";
+import { buildScript } from "./lib/script";
+import { DEFAULT_TEXTS, load, parseBackup, save, type SavedState } from "./lib/storage";
 import { emptyPeriod, type PeriodStats } from "./lib/types";
 import { DESIGNS, type RenderInput, type Texts } from "./render/slides";
 import { FONT_FAMILY, THEMES, type ThemeId } from "./render/theme";
@@ -30,7 +31,9 @@ export default function App() {
   const [afterId, setAfterId] = useState<string | null>(saved?.afterId ?? null);
   const [texts, setTexts] = useState<Texts>(saved?.texts ?? DEFAULT_TEXTS);
   const [themeId, setThemeId] = useState<ThemeId>(saved?.themeId ?? "dark");
-  const [tab, setTab] = useState<"video" | "thumbnail">("video");
+  const [tab, setTab] = useState<"video" | "thumbnail" | "script">("video");
+  const [copied, setCopied] = useState(false);
+  const [backupError, setBackupError] = useState("");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [extras, setExtras] = useState<Record<string, { url: string; notes: string[]; rawText: string }>>({});
   const [fontVersion, setFontVersion] = useState(0);
@@ -98,6 +101,37 @@ export default function App() {
   );
   const significance = before && after && before !== after ? avgRankSignificance(before, after) : null;
   const designs = DESIGNS.filter((d) => d.kind === tab);
+
+  const script = useMemo(() => (before && after && before !== after ? buildScript(before, after, texts) : ""), [before, after, texts]);
+  const copyScript = async () => {
+    try {
+      await navigator.clipboard.writeText(script);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  // 入力した内容をファイルに保存しておけば、別の PC やブラウザでも続きができる
+  const exportBackup = () => {
+    const state: SavedState = { periods, beforeId, afterId, texts, themeId };
+    downloadBlob(new Blob([JSON.stringify(state, null, 2)], { type: "application/json" }), "jantama-studio.json");
+  };
+  const importBackup = async (file: File | undefined) => {
+    if (!file) return;
+    setBackupError("");
+    const state = parseBackup(await file.text());
+    if (!state) {
+      setBackupError("このファイルは読み込めませんでした。「データを保存」で作ったファイルを選んでください。");
+      return;
+    }
+    setPeriods(state.periods);
+    setBeforeId(state.beforeId);
+    setAfterId(state.afterId);
+    setTexts(state.texts);
+    setThemeId(state.themeId);
+  };
 
   const saveAll = async () => {
     for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas[data-design]")) {
@@ -215,6 +249,19 @@ export default function App() {
               {significance.p < 0.05 ? "（偶然とは考えにくい差です）" : "（偶然でも起こりうる差です。戦数を増やすと確かめられます）"}
             </p>
           )}
+
+          <h2>データの保存</h2>
+          <p className="muted">読み取った成績や文字をファイルに保存しておくと、別の PC でも続きから作れます。</p>
+          <div className="row">
+            <button className="ghost" onClick={exportBackup} disabled={!periods.length}>
+              データを保存
+            </button>
+            <label className="ghost-button">
+              データを読み込む
+              <input type="file" accept="application/json,.json" hidden onChange={(e) => importBackup(e.target.files?.[0])} />
+            </label>
+          </div>
+          {backupError && <p className="note">{backupError}</p>}
         </section>
 
         <section className="main">
@@ -226,6 +273,9 @@ export default function App() {
               <button className={tab === "thumbnail" ? "active" : ""} onClick={() => setTab("thumbnail")}>
                 サムネイル（1280×720）
               </button>
+              <button className={tab === "script" ? "active" : ""} onClick={() => setTab("script")}>
+                台本の下書き
+              </button>
             </div>
             <div className="tabs">
               {Object.values(THEMES).map((t) => (
@@ -234,14 +284,28 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <button onClick={saveAll} disabled={!input}>
-              表示中の図をまとめて保存
-            </button>
+            {tab !== "script" && (
+              <button onClick={saveAll} disabled={!input}>
+                表示中の図をまとめて保存
+              </button>
+            )}
           </div>
           {!input ? (
             <div className="empty">
               <p>左でスクリーンショットを読み込むと、ここに図が出ます。</p>
               <p className="muted">「前」と「後」の2期間を比べるので、学ぶ前と後の2枚を読み込んでください。</p>
+            </div>
+          ) : tab === "script" ? (
+            <div className="script">
+              <p className="muted">図の内容に沿った、ナレーションの下書きです。自分の言葉に直して使ってください。</p>
+              {script ? (
+                <>
+                  <textarea readOnly value={script} rows={18} />
+                  <button onClick={copyScript}>{copied ? "コピーしました" : "コピー"}</button>
+                </>
+              ) : (
+                <p>「前」と「後」に別々の期間を選ぶと、台本の下書きが出ます。</p>
+              )}
             </div>
           ) : (
             <div className="previews">
