@@ -147,3 +147,9 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# OCR assets copied from node_modules on install
+public/ocr/
+
+# 手元のスクリーンショットでの確認用（個人の成績画像なのでコミットしない）
+test/local/
